@@ -154,6 +154,8 @@ class AuditlogRule(models.Model):
         super(AuditlogRule, self)._register_hook()
         if not hasattr(self.pool, "_auditlog_field_cache"):
             self.pool._auditlog_field_cache = {}
+        if not hasattr(self.pool, "_auditlog_tracking_fields_cache"):
+            self.pool._auditlog_tracking_fields_cache = {}
         if not hasattr(self.pool, "_auditlog_model_cache"):
             self.pool._auditlog_model_cache = {}
         if not self:
@@ -267,6 +269,8 @@ class AuditlogRule(models.Model):
             for new_record in new_records.sudo():
                 new_values.setdefault(new_record.id, {})
                 for fname, field in new_record._fields.items():
+                    if field.compute:
+                        continue
                     if fname not in fields_list:
                         continue
                     new_values[new_record.id][fname] = field.convert_to_read(
@@ -346,28 +350,33 @@ class AuditlogRule(models.Model):
         """Instanciate a write method that log its calls."""
         self.ensure_one()
         log_type = self.log_type
+        get_tracking_fields = self._get_tracking_fields
 
         def write_full(self, vals, **kwargs):
-            self = self.with_context(auditlog_disabled=True)
+            audit_records = self.with_context(auditlog_disabled=True).filtered(
+                lambda x: not isinstance(x.id, models.NewId)
+            )
             rule_model = self.env["auditlog.rule"]
             fields_list = rule_model.get_auditlog_fields(self)
             old_values = {
                 d["id"]: d
-                for d in self.sudo()
+                for d in audit_records.sudo()
                 .with_context(prefetch_fields=False)
                 .read(fields_list)
+                .read(get_tracking_fields(self._name))
             }
             result = write_full.origin(self, vals, **kwargs)
             new_values = {
                 d["id"]: d
-                for d in self.sudo()
+                for d in audit_records.sudo()
                 .with_context(prefetch_fields=False)
                 .read(fields_list)
+                .read(get_tracking_fields(self._name))
             }
             rule_model.sudo().create_logs(
                 self.env.uid,
                 self._name,
-                self.ids,
+                audit_records.ids,
                 "write",
                 old_values,
                 new_values,
@@ -376,20 +385,22 @@ class AuditlogRule(models.Model):
             return result
 
         def write_fast(self, vals, **kwargs):
-            self = self.with_context(auditlog_disabled=True)
+            audit_records = self.with_context(auditlog_disabled=True).filtered(
+                lambda x: not isinstance(x.id, models.NewId)
+            )
             rule_model = self.env["auditlog.rule"]
             # Log the user input only, no matter if the `vals` is updated
             # afterwards as it could not represent the real state
             # of the data in the database
             vals2 = dict(vals)
             old_vals2 = dict.fromkeys(list(vals2.keys()), False)
-            old_values = {id_: old_vals2 for id_ in self.ids}
-            new_values = {id_: vals2 for id_ in self.ids}
+            old_values = {id_: old_vals2 for id_ in audit_records.ids}
+            new_values = {id_: vals2 for id_ in audit_records.ids}
             result = write_fast.origin(self, vals, **kwargs)
             rule_model.sudo().create_logs(
                 self.env.uid,
                 self._name,
-                self.ids,
+                audit_records.ids,
                 "write",
                 old_values,
                 new_values,
@@ -403,6 +414,7 @@ class AuditlogRule(models.Model):
         """Instanciate an unlink method that log its calls."""
         self.ensure_one()
         log_type = self.log_type
+        get_tracking_fields = self._get_tracking_fields
 
         def unlink_full(self, **kwargs):
             self = self.with_context(auditlog_disabled=True)
@@ -412,6 +424,7 @@ class AuditlogRule(models.Model):
                 d["id"]: d
                 for d in self.sudo()
                 .with_context(prefetch_fields=False)
+                .read(get_tracking_fields(self._name))
                 .read(fields_list)
             }
             rule_model.sudo().create_logs(
@@ -497,6 +510,17 @@ class AuditlogRule(models.Model):
                 self._create_log_line_on_read(
                     log, list(old_values.get(res_id, EMPTY_DICT).keys()), old_values
                 )
+
+    def _get_tracking_fields(self, model):
+        cache = self.pool._auditlog_tracking_fields_cache
+        if model not in cache:
+            tracking_fields = []
+            for field_name, field in self.env[model]._fields.items():
+                if field.compute:
+                    continue
+                tracking_fields.append(field_name)
+            cache[model] = tracking_fields
+        return cache[model]
 
     def _get_field(self, model, field_name):
         cache = self.pool._auditlog_field_cache
