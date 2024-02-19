@@ -5,7 +5,6 @@
 from odoo.tests.common import Form
 
 from odoo.addons.base.models.ir_model import MODULE_UNINSTALL_FLAG
-from odoo.addons.base.models.res_users import name_boolean_group
 
 from .common import AuditLogRuleCommon
 
